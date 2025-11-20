@@ -4,7 +4,7 @@ import forestAudio from '../background-noise/forest.mp3'
 import campfireAudio from '../background-noise/campfire.mp3'
 import ambientWaveAudio from '../background-noise/ambient-wave.mp3'
 
-const musicOptions = [
+export const musicOptions = [
   {
     id: 'ocean-waves',
     name: 'Ocean Waves',
