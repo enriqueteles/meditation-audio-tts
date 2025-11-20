@@ -7,6 +7,7 @@ const VOICE_ID = 'skDYzXO115YQQ50enF2w'
 const MODEL_ID = 'eleven_multilingual_v2'
 const OUTPUT_FORMAT = 'mp3_44100_128'
 const APP_PASSWORD = import.meta.env.VITE_APP_PASSWORD
+const MAX_CHARS_PER_REQUEST = 9000
 
 function App() {
   const [script, setScript] = useState('')
@@ -119,32 +120,49 @@ function App() {
       return
     }
 
+    const scriptChunks = splitScriptIntoChunks(script, MAX_CHARS_PER_REQUEST)
+    if (scriptChunks.length === 0) {
+      setErrorMessage('Unable to process the provided script. Please try again.')
+      return
+    }
+
     setIsGenerating(true)
     setErrorMessage('')
     setIsPlaying(false)
 
     try {
-      const audioStream = await elevenLabsClient.textToSpeech.convert(VOICE_ID, {
-        text: script,
-        modelId: MODEL_ID,
-        outputFormat: OUTPUT_FORMAT,
-        voiceSettings: {
-          speed,
-          stability,
-          similarity_boost: similarityBoost,
-        },
-      })
+      const chunkBuffers = []
 
-      const response = new Response(audioStream)
-      const blob = await response.blob()
-      const nextUrl = URL.createObjectURL(blob)
+      for (const chunk of scriptChunks) {
+        const audioStream = await elevenLabsClient.textToSpeech.convert(VOICE_ID, {
+          text: chunk,
+          modelId: MODEL_ID,
+          outputFormat: OUTPUT_FORMAT,
+          voiceSettings: {
+            speed,
+            stability,
+            similarity_boost: similarityBoost,
+          },
+        })
+
+        const response = new Response(audioStream)
+        const buffer = await response.arrayBuffer()
+        chunkBuffers.push(buffer)
+      }
+
+      const combinedBlob = await combineAudioChunks(chunkBuffers)
+      if (!combinedBlob) {
+        throw new Error('Unable to combine generated audio segments.')
+      }
+
+      const nextUrl = URL.createObjectURL(combinedBlob)
 
       if (objectUrlRef.current) {
         URL.revokeObjectURL(objectUrlRef.current)
       }
 
       objectUrlRef.current = nextUrl
-      setAudioBlob(blob)
+      setAudioBlob(combinedBlob)
       setAudioUrl(nextUrl)
       setCurrentTime(0)
       setDuration(0)
@@ -220,7 +238,7 @@ function App() {
     const downloadUrl = URL.createObjectURL(blobToDownload)
     const link = document.createElement('a')
     link.href = downloadUrl
-    link.download = `yoga-voice-${Date.now()}${mixedResult ? '-mixed.wav' : '.mp3'}`
+    link.download = `yoga-voice-${Date.now()}${mixedResult ? '-mixed.wav' : '.wav'}`
     document.body.appendChild(link)
     link.click()
     document.body.removeChild(link)
@@ -500,6 +518,85 @@ function App() {
 }
 
 export default App
+
+const splitScriptIntoChunks = (text, maxChars) => {
+  if (!text) return []
+  const normalized = text.trim()
+  if (!normalized) return []
+  if (normalized.length <= maxChars) return [normalized]
+
+  const sentenceRegex = /[^.!?]+[.!?]*/g
+  const sentences = normalized.match(sentenceRegex) || [normalized]
+  const chunks = []
+  let current = ''
+
+  const pushCurrent = () => {
+    if (current.trim()) {
+      chunks.push(current.trim())
+      current = ''
+    }
+  }
+
+  for (const rawSentence of sentences) {
+    const sentence = rawSentence.trim()
+    if (!sentence) continue
+
+    const tentative = current ? `${current} ${sentence}` : sentence
+    if (tentative.length <= maxChars) {
+      current = tentative
+      continue
+    }
+
+    pushCurrent()
+
+    if (sentence.length <= maxChars) {
+      current = sentence
+      continue
+    }
+
+    for (let i = 0; i < sentence.length; i += maxChars) {
+      const slice = sentence.slice(i, i + maxChars).trim()
+      if (slice) {
+        chunks.push(slice)
+      }
+    }
+  }
+
+  pushCurrent()
+  return chunks
+}
+
+const combineAudioChunks = async (arrayBuffers) => {
+  if (!arrayBuffers.length) {
+    return null
+  }
+
+  const audioContext = getAudioContext()
+
+  try {
+    const decodedBuffers = []
+    let totalLength = 0
+
+    for (const buffer of arrayBuffers) {
+      const decoded = await audioContext.decodeAudioData(buffer.slice(0))
+      decodedBuffers.push(decoded)
+      totalLength += decoded.length
+    }
+
+    const combinedSamples = new Float32Array(totalLength)
+    let offset = 0
+
+    decodedBuffers.forEach((audioBuffer) => {
+      const monoData = getMonoChannelData(audioBuffer)
+      combinedSamples.set(monoData, offset)
+      offset += monoData.length
+    })
+
+    return encodeWav(combinedSamples, audioContext.sampleRate)
+  } finally {
+    audioContext.close()
+  }
+}
 
 const getAudioContext = () => {
   if (typeof window === 'undefined') {
